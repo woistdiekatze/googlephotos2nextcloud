@@ -21,7 +21,7 @@ uv sync                # core dependencies
 uv sync --extra heif   # also install pillow-heif, to read HEIC EXIF data
 ```
 
-Python 3.9+ is supported; uv can fetch an interpreter if none is installed. `ffprobe` (part of ffmpeg) is optional
+Python 3.11+ is supported (older versions are end-of-life); uv can fetch an interpreter if none is installed. `ffprobe` (part of ffmpeg) is optional
 and only used to read the creation date of videos.
 
 ## Configuration
