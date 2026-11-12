@@ -3,6 +3,7 @@ import hashlib
 import json
 import os
 import threading
+import zipfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import quote, unquote, urlparse
 from xml.sax.saxutils import escape
@@ -11,6 +12,7 @@ import pytest
 from PIL import Image
 
 from gp2nc import importer as gp2nc
+from gp2nc.sources import ZipSource, open_takeout
 
 os.environ["GP2NC_RETRY_DELAY"] = "0"
 
@@ -279,7 +281,24 @@ def test_load_config(monkeypatch):
 # --------------------------------------------------------------------------
 # End to end
 # --------------------------------------------------------------------------
-def test_end_to_end_import_is_correct_and_idempotent(tmp_path, nextcloud):
+def run_import(config, takeout, as_zip: bool) -> None:
+    """Import the Takeout folder as it is, or packed into a zip that is read in place."""
+    if not as_zip:
+        gp2nc.run(config, str(takeout))
+        return
+    archive = takeout.parents[1] / "takeout.zip"
+    if not archive.exists():
+        with zipfile.ZipFile(archive, "w") as zf:
+            for path in sorted(takeout.rglob("*")):
+                if path.is_file():
+                    zf.write(path, "Takeout/Google Photos/" + path.relative_to(takeout).as_posix())
+    source, root = open_takeout(str(archive))  # finds "Takeout/Google Photos" inside the archive
+    with source:
+        gp2nc.run(config, root, source)
+
+
+@pytest.mark.parametrize("as_zip", [False, True], ids=["directory", "zip"])
+def test_end_to_end_import_is_correct_and_idempotent(tmp_path, nextcloud, as_zip):
     takeout = tmp_path / "Takeout" / "Google Photos"
     album = takeout / "Vacation"
     album.mkdir(parents=True)
@@ -296,7 +315,7 @@ def test_end_to_end_import_is_correct_and_idempotent(tmp_path, nextcloud):
     nextcloud.files[FILES + "/Photos/2017/02/IMG_9999(1).jpg"] = (album / "holiday.jpg").read_bytes()
 
     config = gp2nc.load_config({"NEXTCLOUD_URL": nextcloud.url})
-    gp2nc.run(config, str(takeout))
+    run_import(config, takeout, as_zip)
 
     base = FILES + "/Photos"
     assert base + "/2019/07/beach.jpg" in nextcloud.files
@@ -312,11 +331,11 @@ def test_end_to_end_import_is_correct_and_idempotent(tmp_path, nextcloud):
     assert ALBUMS + "/Vacation" in nextcloud.dirs
     entries = sorted(p.rpartition("/")[2].partition("-")[2] for p in nextcloud.files if p.startswith(ALBUMS + "/Vacation/"))
     assert entries == ["beach.jpg", "holiday.jpg", "old photo.jpg", "sunset.jpg"]
-    assert not (album / "gp2nc-error.log").exists()
+    assert not list(tmp_path.rglob("gp2nc-error.log"))
 
     # second run: nothing left to do
     before = {m: nextcloud.count(m) for m in ("PUT", "COPY", "MOVE")}
-    gp2nc.run(config, str(takeout))
+    run_import(config, takeout, as_zip)
     assert {m: nextcloud.count(m) for m in ("PUT", "COPY", "MOVE")} == before
 
 
@@ -330,3 +349,102 @@ def test_missing_upload_folder_aborts_with_clear_message(tmp_path, nextcloud):
     config = gp2nc.load_config({"NEXTCLOUD_URL": nextcloud.url})
     with pytest.raises(SystemExit):
         gp2nc.run(config, str(takeout))
+
+
+# --------------------------------------------------------------------------
+# Reading a Takeout zip in place
+# --------------------------------------------------------------------------
+def test_zip_source_lists_implicit_directories_and_entries(tmp_path):
+    archive = tmp_path / "takeout-001.zip"
+    with zipfile.ZipFile(archive, "w") as zf:
+        zf.writestr("Takeout/Google Photos/Vacation/IMG_1.jpg", b"jpeg-bytes")
+        zf.writestr("Takeout/Google Photos/Vacation/metadata.json", b"{}")
+        zf.writestr("Takeout/Other/readme.txt", b"x")
+
+    with ZipSource(str(archive)) as source:
+        assert source.listdir("Takeout") == ["Google Photos", "Other"]
+        assert source.isdir("Takeout/Google Photos")  # directories exist only implicitly
+        assert source.listdir("Takeout/Google Photos/Vacation") == ["IMG_1.jpg", "metadata.json"]
+        assert source.isfile("Takeout/Google Photos/Vacation/IMG_1.jpg")
+        assert not source.isfile("Takeout/Google Photos/Vacation")
+        assert source.listdir("Missing") == []
+        assert source.size("Takeout/Google Photos/Vacation/IMG_1.jpg") == len(b"jpeg-bytes")
+        with source.open("Takeout/Google Photos/Vacation/IMG_1.jpg") as stream:
+            assert len(stream) == len(b"jpeg-bytes")
+            assert stream.read() == b"jpeg-bytes"
+        with source.local_copy("Takeout/Google Photos/Vacation/IMG_1.jpg") as copy:
+            assert open(copy, "rb").read() == b"jpeg-bytes"
+        assert not os.path.exists(copy)  # temporary copy is removed again
+
+    # error markers of an archive live next to it, not inside it
+    with ZipSource(str(archive)) as source:
+        marker = source.error_log("Takeout/Google Photos/Vacation")
+    assert marker == str(tmp_path / "gp2nc-errors" / "takeout-001.zip" / "Vacation" / "gp2nc-error.log")
+
+
+def test_open_takeout_detects_folder_and_honours_zip_folder(tmp_path):
+    archive = tmp_path / "takeout.zip"
+    with zipfile.ZipFile(archive, "w") as zf:
+        zf.writestr("Takeout/Google Photos/Vacation/metadata.json", b"{}")
+
+    source, root = open_takeout(str(archive))
+    source.close()
+    assert root == "Takeout/Google Photos"
+
+    source, root = open_takeout(str(archive), "Takeout/Google Photos/Vacation")
+    source.close()
+    assert root == "Takeout/Google Photos/Vacation"
+
+    with pytest.raises(SystemExit):
+        open_takeout(str(archive), "Nope")
+
+
+def test_command_line_imports_a_zip(tmp_path, nextcloud, monkeypatch):
+    monkeypatch.setenv("NEXTCLOUD_URL", nextcloud.url)
+    monkeypatch.setenv("GP2NC_THREADS", "2")
+    album = tmp_path / "Takeout" / "Google Photos" / "Vacation"
+    album.mkdir(parents=True)
+    write_json(album / "metadata.json", {"title": "Vacation"})
+    make_jpeg(album / "beach.jpg", "red", exif_original="2019:07:04 10:11:12")
+    archive = tmp_path / "takeout.zip"
+    with zipfile.ZipFile(archive, "w") as zf:
+        zf.write(album / "beach.jpg", "Takeout/Google Photos/Vacation/beach.jpg")
+        zf.write(album / "metadata.json", "Takeout/Google Photos/Vacation/metadata.json")
+
+    assert gp2nc.main([str(archive)]) == 0
+    assert FILES + "/Photos/2019/07/beach.jpg" in nextcloud.files
+    assert ALBUMS + "/Vacation" in nextcloud.dirs
+
+
+def test_command_line_rejects_files_that_are_not_zips(tmp_path, capsys):
+    not_a_zip = tmp_path / "notes.txt"
+    not_a_zip.write_text("hello")
+    with pytest.raises(SystemExit):
+        gp2nc.main([str(not_a_zip)])
+    assert "neither a directory nor a .zip file" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    ("folder", "metadata", "album"),
+    [("Google Foto", "metadati.json", "Vacanza"), ("Fotky Google", "metadáta.json", "Dovolenka"),
+     ("Google Снимки", "метаданни.json", "Ваканция")],
+)
+def test_localized_takeout_folder_and_album_metadata(tmp_path, nextcloud, monkeypatch, folder, metadata, album):
+    monkeypatch.setenv("NEXTCLOUD_URL", nextcloud.url)
+    photos = tmp_path / "Takeout" / folder / album
+    photos.mkdir(parents=True)
+    write_json(photos / metadata, {"title": album})
+    make_jpeg(photos / "spiaggia.jpg", "red", exif_original="2020:06:01 09:00:00")
+    archive = tmp_path / "takeout.zip"
+    with zipfile.ZipFile(archive, "w") as zf:
+        zf.write(photos / metadata, f"Takeout/{folder}/{album}/{metadata}")
+        zf.write(photos / "spiaggia.jpg", f"Takeout/{folder}/{album}/spiaggia.jpg")
+
+    source, root = open_takeout(str(archive))
+    source.close()
+    assert root == f"Takeout/{folder}"  # found without --zip-folder
+
+    assert gp2nc.main([str(archive)]) == 0
+    assert FILES + "/Photos/2020/06/spiaggia.jpg" in nextcloud.files
+    assert ALBUMS + "/" + album in nextcloud.dirs
+

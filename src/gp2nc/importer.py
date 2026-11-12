@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import dataclasses
+import fnmatch
 import glob
 import hashlib
 import json
@@ -34,7 +35,9 @@ import threading
 import time
 import traceback
 import xml.etree.ElementTree as ET
+import zipfile
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Callable, Mapping
@@ -50,6 +53,19 @@ except Exception:  # pragma: no cover - optional dependency
     pass
 
 from PIL import Image
+
+from gp2nc.sources import DIRECTORY, Source, open_takeout
+
+# Album title files, named per language of the Takeout (from simulot/TakeoutLocalization)
+ALBUM_METADATA_FILES = (
+    "metadata.json",     # en
+    "Metadaten.json",    # de
+    "métadonnées.json",  # fr
+    "metadati.json",     # it
+    "metadáta.json",     # sk
+    "метаданные.json",   # ru
+    "метаданни.json",    # bg
+)
 
 DAV = "{DAV:}"
 OC = "{http://owncloud.org/ns}"
@@ -86,11 +102,11 @@ def log(line: str) -> None:
         sys.stdout.flush()
 
 
-def read_json(path: str) -> Any:
+def read_json(path: str, source: Source = DIRECTORY) -> Any:
     try:
-        with open(path, encoding="utf-8") as handle:
-            return json.load(handle)
-    except (OSError, ValueError):
+        with source.open(path) as handle:
+            return json.load(handle)  # json accepts the bytes of a UTF-8 file
+    except (OSError, KeyError, ValueError):
         return None
 
 
@@ -176,7 +192,7 @@ class DavClient:
         path: str,
         headers: Mapping[str, str] | None = None,
         data: bytes | None = None,
-        upload_from: str | None = None,
+        upload_from: Callable[[], AbstractContextManager[Any]] | None = None,
     ) -> requests.Response:
         attempts = 0
         while True:
@@ -184,7 +200,7 @@ class DavClient:
             try:
                 if upload_from is not None:
                     # re-open on every attempt so a retry starts at byte 0
-                    with open(upload_from, "rb") as handle:
+                    with upload_from() as handle:
                         return self.session.request(
                             method, self.url(path), headers=headers, data=handle,
                             allow_redirects=False, timeout=(30, 600),
@@ -214,9 +230,9 @@ class DavClient:
 # --------------------------------------------------------------------------
 # Hashing
 # --------------------------------------------------------------------------
-def md5_file(path: str) -> str:
+def md5_file(path: str, source: Source = DIRECTORY) -> str:
     digest = hashlib.md5()
-    with open(path, "rb") as handle:
+    with source.open(path) as handle:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
@@ -267,46 +283,59 @@ EXIF_FORMATS = [
 MOTION_VIDEO_EXTENSIONS = ["MP4", "MOV"]
 COMPANION_IMAGE_EXTENSIONS = ["JPG", "JPEG", "HEIC", "HEIF"]
 
-_taken_cache: dict[str, datetime] = {}
+_taken_cache: dict[tuple[str, str], datetime] = {}
 
 
 def utc_from_timestamp(timestamp: int | float) -> datetime:
     return datetime.fromtimestamp(timestamp, tz=timezone.utc)
 
 
-def _glob(pattern_prefix: str, suffix: str = "") -> list[str]:
-    """glob(escape(prefix) + suffix), sorted like PHP's glob()."""
-    return sorted(glob.glob(glob.escape(pattern_prefix) + suffix))
+def _matching(source: Source, directory: str, pattern: str) -> list[str]:
+    """Children of ``directory`` whose name matches the glob ``pattern``, sorted like PHP's glob().
+
+    Like glob(), hidden names are skipped unless the pattern itself starts with a dot.
+    """
+    return sorted(
+        posixpath.join(directory, name)
+        for name in source.listdir(directory)
+        if fnmatch.fnmatchcase(name, pattern) and (pattern.startswith(".") or not name.startswith("."))
+    )
 
 
-def metadata_timestamp(path: str, name_for_logging: str) -> int | None:
+def _glob(source: Source, path_prefix: str, suffix: str = "") -> list[str]:
+    """glob(escape(path_prefix) + suffix) on a source: e.g. the sidecars of one photo."""
+    directory, name = posixpath.split(path_prefix)
+    return _matching(source, directory, glob.escape(name) + suffix)
+
+
+def metadata_timestamp(path: str, name_for_logging: str, source: Source = DIRECTORY) -> int | None:
     def say(message: str) -> None:
         log(f"[{name_for_logging}] - {message}")
 
-    directory, filename = os.path.split(path)
-    stem, dot_ext = os.path.splitext(filename)
+    directory, filename = posixpath.split(path)
+    stem, dot_ext = posixpath.splitext(filename)
     ext = dot_ext[1:]
     basename = f"{directory or '.'}/{stem}"
 
-    options = _glob(path, "*.json")
+    options = _glob(source, path, "*.json")
     match = re.search(r"([^(]+)(\(\d+\))$", basename)
     if match:
         prefix, increment = match.group(1), match.group(2)
         original_filename = prefix.rstrip() + "." + ext
 
         def sidecar_glob() -> list[str]:
-            return sorted(glob.glob(glob.escape(prefix + "." + ext) + "*" + glob.escape(increment) + ".json"))
+            return _glob(source, prefix + "." + ext, "*" + glob.escape(increment) + ".json")
 
-        if not os.path.exists(original_filename):
-            say(f"Possible duplicate of `{os.path.basename(original_filename)}` in filename, but original file missing")
-        elif os.path.getsize(path) == os.path.getsize(original_filename):
+        if not source.isfile(original_filename):
+            say(f"Possible duplicate of `{posixpath.basename(original_filename)}` in filename, but original file missing")
+        elif source.size(path) == source.size(original_filename):
             say(
-                f"Duplicate of `{os.path.basename(original_filename)}`, try to find additional "
+                f"Duplicate of `{posixpath.basename(original_filename)}`, try to find additional "
                 f"metadata files: {original_filename}.*{increment}.json"
             )
             options = options + sidecar_glob()
         else:
-            say(f"Possible duplicate of `{os.path.basename(original_filename)}` in filename, but filesize mismatch")
+            say(f"Possible duplicate of `{posixpath.basename(original_filename)}` in filename, but filesize mismatch")
             options = sidecar_glob()
     else:
         # `IMG_1.jpg*.json` also matches `IMG_1.jpg.supplemental-metadata(1).json`, which belongs to the
@@ -317,7 +346,7 @@ def metadata_timestamp(path: str, name_for_logging: str) -> int | None:
     if not options and ext.lower() == "mp4":
         # Live Photo: the MP4 motion clip shares metadata with its HEIC/JPG companion
         for companion_ext in ["HEIC", "heic", "JPG", "jpg", "JPEG", "jpeg"]:
-            companion_options = _glob(basename + "." + companion_ext, "*.json")
+            companion_options = _glob(source, basename + "." + companion_ext, "*.json")
             if companion_options:
                 options = companion_options
                 break
@@ -327,9 +356,9 @@ def metadata_timestamp(path: str, name_for_logging: str) -> int | None:
         return None
 
     for option in options:
-        if not os.path.isfile(option):
+        if not source.isfile(option):
             continue
-        photo_metadata = read_json(option)
+        photo_metadata = read_json(option, source)
         if not isinstance(photo_metadata, dict):
             continue
         if photo_metadata.get("photoTakenTime") is not None:
@@ -342,29 +371,29 @@ def metadata_timestamp(path: str, name_for_logging: str) -> int | None:
     return None
 
 
-def taken_time_from_companion_image(video_path: str, video_filename: str) -> datetime | None:
-    directory, filename = os.path.split(video_path)
-    stem = os.path.splitext(filename)[0]
+def taken_time_from_companion_image(video_path: str, video_filename: str, source: Source) -> datetime | None:
+    directory, filename = posixpath.split(video_path)
+    stem = posixpath.splitext(filename)[0]
     companions: list[str] = []
     for companion_ext in COMPANION_IMAGE_EXTENSIONS:
         for ext_option in (companion_ext, companion_ext.lower()):
             candidate = f"{directory or '.'}/{stem}.{ext_option}"
-            if os.path.isfile(candidate) and candidate not in companions:
+            if source.isfile(candidate) and candidate not in companions:
                 companions.append(candidate)
 
     for companion in companions:
-        timestamp = metadata_timestamp(companion, video_filename)
+        timestamp = metadata_timestamp(companion, video_filename, source)
         if timestamp is None:
             continue
-        log(f"[{video_filename}] - Using metadata from companion image `{os.path.basename(companion)}`")
+        log(f"[{video_filename}] - Using metadata from companion image `{posixpath.basename(companion)}`")
         return utc_from_timestamp(timestamp)
     return None
 
 
-def _read_exif_dates(path: str) -> dict[str, str] | None:
+def _read_exif_dates(path: str, source: Source) -> dict[str, str] | None:
     """EXIF date strings, {} if the image has none, None if it is not a readable image."""
     try:
-        with Image.open(path) as image:
+        with source.open(path) as stream, Image.open(stream) as image:
             exif = image.getexif()
             try:
                 exif_ifd = exif.get_ifd(0x8769)
@@ -387,16 +416,17 @@ def _read_exif_dates(path: str) -> dict[str, str] | None:
     return dates
 
 
-def _ffprobe_creation_time(path: str) -> datetime | None:
+def _ffprobe_creation_time(path: str, source: Source) -> datetime | None:
     ffprobe = shutil.which("ffprobe")
     if not ffprobe:
         return None
     try:
-        completed = subprocess.run(
-            [ffprobe, "-v", "error", "-print_format", "json",
-             "-show_entries", "format_tags=creation_time:stream_tags=creation_time", "-i", path],
-            capture_output=True, text=True, timeout=60, check=True,
-        )
+        with source.local_copy(path) as local:  # ffprobe needs a real file
+            completed = subprocess.run(
+                [ffprobe, "-v", "error", "-print_format", "json",
+                 "-show_entries", "format_tags=creation_time:stream_tags=creation_time", "-i", local],
+                capture_output=True, text=True, timeout=60, check=True,
+            )
         info = json.loads(completed.stdout or "{}")
     except Exception:
         return None
@@ -417,11 +447,11 @@ def _ffprobe_creation_time(path: str) -> datetime | None:
     return None
 
 
-def _taken_time_from_file_contents(photo_path: str, photo_filename: str) -> datetime | None:
-    exif = _read_exif_dates(photo_path)
+def _taken_time_from_file_contents(photo_path: str, photo_filename: str, source: Source) -> datetime | None:
+    exif = _read_exif_dates(photo_path, source)
     if exif is None:
         # not an image Pillow can read (e.g. a video): ask ffprobe, if available
-        created = _ffprobe_creation_time(photo_path)
+        created = _ffprobe_creation_time(photo_path, source)
         if created is not None:
             log(f"[{photo_filename}] - Found `{created.isoformat()}` in media container metadata")
         return created
@@ -441,27 +471,28 @@ def _taken_time_from_file_contents(photo_path: str, photo_filename: str) -> date
     return None
 
 
-def taken_time(photo_path: str) -> datetime:
-    cached = _taken_cache.get(photo_path)
+def taken_time(photo_path: str, source: Source = DIRECTORY) -> datetime:
+    cache_key = (source.identity, photo_path)
+    cached = _taken_cache.get(cache_key)
     if cached is not None:
         return cached
 
-    photo_filename = os.path.basename(photo_path)
-    timestamp = metadata_timestamp(photo_path, photo_filename)
+    photo_filename = posixpath.basename(photo_path)
+    timestamp = metadata_timestamp(photo_path, photo_filename, source)
     if timestamp is not None:
         result = utc_from_timestamp(timestamp)
     else:
         result = None
-        extension = os.path.splitext(photo_path)[1][1:].upper()
+        extension = posixpath.splitext(photo_path)[1][1:].upper()
         if extension in MOTION_VIDEO_EXTENSIONS:
-            result = taken_time_from_companion_image(photo_path, photo_filename)
+            result = taken_time_from_companion_image(photo_path, photo_filename, source)
         if result is None:
-            result = _taken_time_from_file_contents(photo_path, photo_filename)
+            result = _taken_time_from_file_contents(photo_path, photo_filename, source)
         if result is None:
             log(f"[{photo_filename}] - Found no datetime in exif data nor metadata, falling back to filemtime")
-            result = utc_from_timestamp(int(os.path.getmtime(photo_path)))
+            result = utc_from_timestamp(int(source.mtime(photo_path)))
 
-    _taken_cache[photo_path] = result
+    _taken_cache[cache_key] = result
     return result
 
 
@@ -501,16 +532,16 @@ class RemoteDirectories:
         return key
 
 
-def upload(dav: DavClient, source: str, target: str) -> None:
-    local_size = os.path.getsize(source)
-    mtime = int(os.path.getmtime(source))
-    ctime = int(taken_time(source).timestamp())  # resolve BEFORE streaming the file
+def upload(dav: DavClient, source: Source, photo_path: str, target: str) -> None:
+    local_size = source.size(photo_path)
+    mtime = int(source.mtime(photo_path))
+    ctime = int(taken_time(photo_path, source).timestamp())  # resolve BEFORE streaming the file
 
     response = dav.request(
         "PUT",
         target,
         headers={"X-OC-MTime": str(mtime), "X-OC-CTime": str(ctime), "OC-Total-Length": str(local_size)},
-        upload_from=source,
+        upload_from=lambda: source.open(photo_path),
     )
     if response.status_code < 200 or response.status_code > 399:
         raise RuntimeError(f"Upload failed, invalid response code ({response.status_code}) received")
@@ -578,7 +609,7 @@ def find_available(exists: Callable[[str], bool], orig_filename: str) -> str:
 
 
 # --------------------------------------------------------------------------
-# Walking a local directory
+# Walking the Takeout (a directory or a zip)
 # --------------------------------------------------------------------------
 INCREMENT = re.compile(r"\([\w\s]+\)")
 
@@ -604,8 +635,10 @@ class DirectoryTask:
         user_albums: list[str],
         remote_files: dict[str, dict[str, dict[str, Any]]],
         executor: ThreadPoolExecutor,
+        source: Source = DIRECTORY,
     ):
         self.dav = dav
+        self.source = source
         self.files_base_path = files_base_path
         self.albums_base_path = albums_base_path
         self.user_albums = set(user_albums)
@@ -619,10 +652,11 @@ class DirectoryTask:
         with self._hash_locks_guard:
             return self._hash_locks.setdefault(content_hash, threading.Lock())
 
-    @staticmethod
-    def store_exception(path: str, error: BaseException) -> str:
+    def store_exception(self, path: str, error: BaseException) -> str:
         trace = "".join(traceback.format_exception(type(error), error, error.__traceback__))
-        with open(os.path.join(path, "gp2nc-error.log"), "w", encoding="utf-8") as handle:
+        marker = self.source.error_log(path)
+        os.makedirs(os.path.dirname(marker), exist_ok=True)
+        with open(marker, "w", encoding="utf-8") as handle:
             handle.write("\n".join(["Failed processing directory: " + str(error), trace]))
         return "failed: " + str(error)
 
@@ -634,17 +668,17 @@ class DirectoryTask:
             debug(f"Copy to album failed with status {response.status_code}")
 
     def __call__(self, origin_path: str) -> str:
-        directory_name = os.path.basename(origin_path)
+        directory_name = posixpath.basename(origin_path)
         album_path = (
             self.albums_base_path + "/" + rawurlencode(directory_name)
             if directory_name in self.user_albums
             else None
         )
 
-        if os.path.isfile(os.path.join(origin_path, "gp2nc-error.log")):
+        if os.path.isfile(self.source.error_log(origin_path)):
             return "skip to prevent recurring crashes, resolve errors first and delete gp2nc-error.log"
 
-        files = [p for p in _glob(origin_path, "/*") if os.path.isfile(p)]
+        files = [p for p in _matching(self.source, origin_path, "*") if self.source.isfile(p)]
         log(f'Found "{directory_name}", containing {len(files)} files')
 
         try:
@@ -655,7 +689,7 @@ class DirectoryTask:
                 log(f'Found album "{directory_name}", containing {len(listing)} photos')
 
             json_files = [p for p in files if p.endswith(".json")]
-            metadata_jsons = [p for p in json_files if p.endswith(("metadata.json", "Metadaten.json"))]
+            metadata_jsons = [p for p in json_files if posixpath.basename(p) in ALBUM_METADATA_FILES]
             photo_files = [p for p in files if not p.endswith(".json")]
             no_photos = len(photo_files)
             if not metadata_jsons:
@@ -711,12 +745,12 @@ class DirectoryTask:
         album_path: str | None,
         album_photos: set[str],
     ) -> None:
-        local_filename = os.path.basename(photo_path)
+        local_filename = posixpath.basename(photo_path)
 
         def debug(message: str) -> None:
             log(f"[{local_filename}] - {message}")
 
-        local_hash = md5_file(photo_path)
+        local_hash = md5_file(photo_path, self.source)
         debug(f"Photo {photo_index} of {no_photos}")
 
         duplicates = self.remote_files.get(local_hash)
@@ -761,13 +795,13 @@ class DirectoryTask:
                         debug("Copied")
             return
 
-        taken = taken_time(photo_path)
+        taken = taken_time(photo_path, self.source)
         debug(f"Photo or video taken @ {taken:%Y-%m-%d %H:%M:%S}")
 
         directory_remote_path = self.directories.create(self.files_base_path, taken.strftime("/%Y/%m"))
         photo_remote_path = directory_remote_path + "/" + rawurlencode(local_filename)
 
-        upload(self.dav, photo_path, photo_remote_path)
+        upload(self.dav, self.source, photo_path, photo_remote_path)
         debug(f'Succesfully uploaded to "{photo_remote_path.replace(self.files_base_path, "")}"')
 
         if album_path is not None:
@@ -829,15 +863,21 @@ def load_config(env: Mapping[str, str]) -> Config:
     return Config(origin, dav_prefix, user, password, parsed.path.rstrip("/"), threads)
 
 
-def run(config: Config, working_directory: str) -> None:
+def run(config: Config, working_directory: str, source: Source = DIRECTORY) -> None:
     log(f"Working from {working_directory}")
     dav = DavClient(config.origin, config.user, config.password)
 
     user_albums: list[str] = []
-    metadata_files = _glob(working_directory, "/*/metadata.json") + _glob(working_directory, "/*/Metadaten.json")
+    albums = _matching(source, working_directory, "*")
+    metadata_files = [
+        posixpath.join(album, name)
+        for name in ALBUM_METADATA_FILES
+        for album in albums
+        if source.isfile(posixpath.join(album, name))
+    ]
     for metadata_file in metadata_files:
-        album_dir_name = os.path.basename(os.path.dirname(metadata_file))
-        metadata = read_json(metadata_file)
+        album_dir_name = posixpath.basename(posixpath.dirname(metadata_file))
+        metadata = read_json(metadata_file, source)
         title = metadata.get("title") if isinstance(metadata, dict) else None
         if title is None:
             continue
@@ -892,40 +932,60 @@ def run(config: Config, working_directory: str) -> None:
 
     log("Walking directories...")
     with ThreadPoolExecutor(max_workers=config.threads) as executor:
-        task = DirectoryTask(dav, upload_root, albums_base_path, user_albums, remote_files, executor)
-        for path in _glob(working_directory, "/*"):
-            if not os.path.isdir(path):
+        task = DirectoryTask(dav, upload_root, albums_base_path, user_albums, remote_files, executor, source)
+        for path in _matching(source, working_directory, "*"):
+            if not source.isdir(path):
                 continue
             result = task(path)
-            log(f'"{os.path.basename(path)}": {result}')
+            log(f'"{posixpath.basename(path)}": {result}')
     log("Done!")
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Import a Google Photos Takeout into Nextcloud.")
     parser.add_argument(
-        "takeout_dir", nargs="?", default=".",
-        help="the 'Takeout/Google Photos' directory (default: current directory)",
+        "takeouts", nargs="*", default=["."], metavar="TAKEOUT",
+        help="the 'Takeout/Google Photos' directory or a Takeout .zip file, one or more "
+             "(default: current directory); zips are read in place, not unpacked",
+    )
+    parser.add_argument(
+        "--zip-folder", metavar="FOLDER",
+        help="folder inside the .zip files that holds the albums (default: 'Takeout/Google Photos' if present, "
+             "else the archive root)",
     )
     parser.add_argument("--threads", type=int, help="number of parallel workers (default: GP2NC_THREADS or 4)")
     args = parser.parse_args(argv)
-    working_directory = os.path.abspath(args.takeout_dir)
+    if args.threads is not None and args.threads < 1:
+        parser.error("--threads must be at least 1")
+
+    inputs = [os.path.abspath(path) for path in args.takeouts]
+    for path in inputs:
+        if os.path.isdir(path):
+            continue
+        if not os.path.isfile(path):
+            parser.error(f"{path} does not exist")
+        if not zipfile.is_zipfile(path):
+            parser.error(f"{path} is neither a directory nor a .zip file")
+    if args.zip_folder is not None and any(os.path.isdir(path) for path in inputs):
+        parser.error("--zip-folder only applies to .zip files")
 
     try:
         from dotenv import load_dotenv
 
-        # .env in the Takeout directory, else in the directory gp2nc is started from
-        env_dir = working_directory if os.path.isfile(os.path.join(working_directory, ".env")) else os.getcwd()
-        load_dotenv(os.path.join(env_dir, ".env"), override=False)  # real env vars win, like createImmutable
+        for path in inputs:
+            folder = path if os.path.isdir(path) else os.path.dirname(path)
+            env_dir = folder if os.path.isfile(os.path.join(folder, ".env")) else os.getcwd()
+            load_dotenv(os.path.join(env_dir, ".env"), override=False)  # real env vars win, like createImmutable
     except ImportError:
         pass
 
     config = load_config(os.environ)
     if args.threads is not None:
-        if args.threads < 1:
-            parser.error("--threads must be at least 1")
         config = dataclasses.replace(config, threads=args.threads)
-    run(config, working_directory)
+    for path in inputs:
+        source, root = open_takeout(path, args.zip_folder)
+        with source:
+            run(config, root, source)
     return 0
 
 
