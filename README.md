@@ -57,12 +57,31 @@ uv run --project /path/to/gp2nc gp2nc "/path/to/Takeout/Google Photos"
 
 Use `--threads N` to set the number of parallel uploads. `python -m gp2nc` works too, once the package is installed.
 
+### Takeout zip files
+
+You don't have to unpack the Takeout. Pass the `.zip` files directly; they are read in place:
+
+```
+uv run --project /path/to/gp2nc gp2nc takeout-001.zip takeout-002.zip
+```
+
+- Google's Takeout splits albums over several zips. Pass them all; they are processed one after another, and the
+  duplicate check means a photo that appears in two zips is uploaded once.
+- Inside each zip the albums are taken from `Takeout/Google Photos` if the archive has that folder, otherwise from
+  the archive root. Use `--zip-folder "Some/Folder"` to pick another folder inside the archive.
+- Zip entries store their date without a time zone; it is read as UTC, the same as EXIF dates without a zone.
+- A directory that fails gets its `gp2nc-error.log` in `gp2nc-errors/<zip name>/<album>/` next to the zip, since
+  a zip cannot be written to. Fix the cause, delete that log and run again.
+
 ### Docker
 
 ```
 docker build . -t gp2nc
-docker run --rm -v "/path/to/Takeout/Google Photos":/photos -e NEXTCLOUD_URL=<NEXTCLOUD_URL> gp2nc
+docker run --rm -v "/path/to/Takeouts":/photos -e NEXTCLOUD_URL=<NEXTCLOUD_URL> gp2nc takeout-001.zip takeout-002.zip
 ```
+
+Mount the folder that holds the zips (or the `Takeout/Google Photos` directory) at `/photos` and name the inputs
+relative to it. Without arguments the image imports the directory mounted at `/photos`.
 
 The image installs the locked dependencies (including `pillow-heif`) with `uv sync --locked`.
 
@@ -73,6 +92,7 @@ pyproject.toml          project metadata, dependencies, console script
 uv.lock                 locked dependency versions (commit this)
 .python-version         Python version used for development
 src/gp2nc/importer.py   the import logic and command line entry point
+src/gp2nc/sources.py    reads a Takeout directory or a .zip in place
 src/gp2nc/__main__.py   enables `python -m gp2nc`
 tests/test_gp2nc.py     unit and end-to-end tests
 Dockerfile
