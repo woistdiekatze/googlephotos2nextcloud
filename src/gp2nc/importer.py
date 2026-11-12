@@ -56,6 +56,17 @@ from PIL import Image
 
 from gp2nc.sources import DIRECTORY, Source, open_takeout
 
+# Album title files, named per language of the Takeout (from simulot/TakeoutLocalization)
+ALBUM_METADATA_FILES = (
+    "metadata.json",     # en
+    "Metadaten.json",    # de
+    "métadonnées.json",  # fr
+    "metadati.json",     # it
+    "metadáta.json",     # sk
+    "метаданные.json",   # ru
+    "метаданни.json",    # bg
+)
+
 DAV = "{DAV:}"
 OC = "{http://owncloud.org/ns}"
 NC = "{http://nextcloud.org/ns}"
@@ -678,7 +689,7 @@ class DirectoryTask:
                 log(f'Found album "{directory_name}", containing {len(listing)} photos')
 
             json_files = [p for p in files if p.endswith(".json")]
-            metadata_jsons = [p for p in json_files if p.endswith(("metadata.json", "Metadaten.json"))]
+            metadata_jsons = [p for p in json_files if posixpath.basename(p) in ALBUM_METADATA_FILES]
             photo_files = [p for p in files if not p.endswith(".json")]
             no_photos = len(photo_files)
             if not metadata_jsons:
@@ -860,7 +871,7 @@ def run(config: Config, working_directory: str, source: Source = DIRECTORY) -> N
     albums = _matching(source, working_directory, "*")
     metadata_files = [
         posixpath.join(album, name)
-        for name in ("metadata.json", "Metadaten.json")
+        for name in ALBUM_METADATA_FILES
         for album in albums
         if source.isfile(posixpath.join(album, name))
     ]

@@ -67,8 +67,12 @@ uv run --project /path/to/gp2nc gp2nc takeout-001.zip takeout-002.zip
 
 - Google's Takeout splits albums over several zips. Pass them all; they are processed one after another, and the
   duplicate check means a photo that appears in two zips is uploaded once.
-- Inside each zip the albums are taken from `Takeout/Google Photos` if the archive has that folder, otherwise from
-  the archive root. Use `--zip-folder "Some/Folder"` to pick another folder inside the archive.
+- Inside each zip the albums are taken from the "Google Photos" folder if the archive has one, otherwise from
+  the archive root. Its name depends on the language of the Google account: `Google Photos` (English, French),
+  `Google Fotos` (German), `Google Foto` (Italian), `Fotky Google` (Slovak), `Google Фото` (Russian) and
+  `Google Снимки` (Bulgarian). Album titles are read from the matching `metadata.json` (or `Metadaten.json`,
+  `métadonnées.json`, `metadati.json`, `metadáta.json`, `метаданные.json`, `метаданни.json`). Use
+  `--zip-folder "Some/Folder"` for any other language or layout.
 - Zip entries store their date without a time zone; it is read as UTC, the same as EXIF dates without a zone.
 - A directory that fails gets its `gp2nc-error.log` in `gp2nc-errors/<zip name>/<album>/` next to the zip, since
   a zip cannot be written to. Fix the cause, delete that log and run again.

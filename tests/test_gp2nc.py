@@ -423,3 +423,28 @@ def test_command_line_rejects_files_that_are_not_zips(tmp_path, capsys):
         gp2nc.main([str(not_a_zip)])
     assert "neither a directory nor a .zip file" in capsys.readouterr().err
 
+
+@pytest.mark.parametrize(
+    ("folder", "metadata", "album"),
+    [("Google Foto", "metadati.json", "Vacanza"), ("Fotky Google", "metadáta.json", "Dovolenka"),
+     ("Google Снимки", "метаданни.json", "Ваканция")],
+)
+def test_localized_takeout_folder_and_album_metadata(tmp_path, nextcloud, monkeypatch, folder, metadata, album):
+    monkeypatch.setenv("NEXTCLOUD_URL", nextcloud.url)
+    photos = tmp_path / "Takeout" / folder / album
+    photos.mkdir(parents=True)
+    write_json(photos / metadata, {"title": album})
+    make_jpeg(photos / "spiaggia.jpg", "red", exif_original="2020:06:01 09:00:00")
+    archive = tmp_path / "takeout.zip"
+    with zipfile.ZipFile(archive, "w") as zf:
+        zf.write(photos / metadata, f"Takeout/{folder}/{album}/{metadata}")
+        zf.write(photos / "spiaggia.jpg", f"Takeout/{folder}/{album}/spiaggia.jpg")
+
+    source, root = open_takeout(str(archive))
+    source.close()
+    assert root == f"Takeout/{folder}"  # found without --zip-folder
+
+    assert gp2nc.main([str(archive)]) == 0
+    assert FILES + "/Photos/2020/06/spiaggia.jpg" in nextcloud.files
+    assert ALBUMS + "/" + album in nextcloud.dirs
+

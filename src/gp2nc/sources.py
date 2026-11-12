@@ -13,13 +13,23 @@ import posixpath
 import shutil
 import tempfile
 import threading
+import unicodedata
 import zipfile
 from collections.abc import Iterator
 from typing import Any, BinaryIO
 
 ERROR_LOG_NAME = "gp2nc-error.log"
 ERROR_LOG_FOLDER = "gp2nc-errors"  # next to a .zip: where error markers of that archive are kept
-ZIP_FOLDER_CANDIDATES = ["Takeout/Google Photos", "Google Photos"]
+# Name of the "Google Photos" folder in a Takeout export, per the language of the Google account
+# (from simulot/TakeoutLocalization). Matched case-sensitively after Unicode NFC normalisation.
+PHOTOS_FOLDER_NAMES = [
+    "Google Photos",    # en, fr
+    "Google Fotos",     # de
+    "Google Foto",      # it
+    "Fotky Google",     # sk
+    "Google Фото",      # ru
+    "Google Снимки",    # bg
+]
 
 
 class Source:
@@ -204,11 +214,22 @@ class ZipSource(Source):
             self._archives.clear()
 
 
+def _find_photos_folder(source: Source) -> str:
+    """The localized "Google Photos" folder inside a Takeout archive, or "" for the archive root."""
+    wanted = {unicodedata.normalize("NFC", name) for name in PHOTOS_FOLDER_NAMES}
+    for parent in ("Takeout", ""):
+        for name in source.listdir(parent):
+            if unicodedata.normalize("NFC", name) in wanted and source.isdir(posixpath.join(parent, name)):
+                return posixpath.join(parent, name)
+    return ""
+
+
 def open_takeout(path: str, zip_folder: str | None = None) -> tuple[Source, str]:
     """The source for a Takeout directory or .zip, and the folder inside it that holds the albums.
 
-    For a zip, ``zip_folder`` names that folder; by default ``Takeout/Google Photos`` is used if the
-    archive has it, otherwise the archive root. The caller closes the returned source.
+    For a zip, ``zip_folder`` names that folder; by default the localized "Google Photos" folder
+    (see PHOTOS_FOLDER_NAMES) is used if the archive has one, otherwise the archive root.
+    The caller closes the returned source.
     """
     if os.path.isfile(path):
         source = ZipSource(path)
@@ -218,10 +239,7 @@ def open_takeout(path: str, zip_folder: str | None = None) -> tuple[Source, str]
                 source.close()
                 raise SystemExit(f"{zip_folder!r} is not a folder inside {path}")
             return source, root
-        for candidate in ZIP_FOLDER_CANDIDATES:
-            if source.isdir(candidate):
-                return source, candidate
-        return source, ""
+        return source, _find_photos_folder(source)
     return DirectorySource(), posixpath.normpath(os.path.abspath(path).replace(os.sep, "/"))
 
 
