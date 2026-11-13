@@ -23,6 +23,8 @@ gp2nc = "gp2nc.importer:main"
 
 [dependency-groups]
 dev = [
+    "flake8>=7.5.0",
+    "flake8-import-order>=0.19.2",
     "pytest>=8",
 ]
 

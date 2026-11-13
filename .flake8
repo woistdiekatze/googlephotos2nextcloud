@@ -1,0 +1,6 @@
+[flake8]
+max-line-length = 120
+# pep8: only checks that the import groups are ordered (stdlib, third party, first party)
+import-order-style = pep8
+application-import-names = gp2nc
+exclude = .git,.venv,build,dist,__pycache__
