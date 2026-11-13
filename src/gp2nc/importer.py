@@ -421,18 +421,44 @@ def _read_exif_dates(path: str, source: Source) -> dict[str, str] | None:
     return dates
 
 
+def _ffprobe_json(ffprobe: str, path: str, source: Source) -> dict[str, Any]:
+    """ffprobe's JSON description of a media file, without writing the file to disk.
+
+    A file on disk is passed by path, so ffprobe can seek straight to the metadata. Content that only
+    exists in an archive is streamed into ffprobe's stdin: ffprobe reads it front to back, which also
+    finds the metadata at the end of an MP4/MOV (the "moov" atom), as long as the stream is read fully.
+    """
+    command = [
+        ffprobe, "-v", "error", "-print_format", "json",
+        "-show_entries", "format_tags=creation_time:stream_tags=creation_time",
+    ]
+    local = source.local_path(path)
+    if local is not None:
+        completed = subprocess.run(command + ["-i", local], capture_output=True, timeout=60, check=True)
+        return json.loads(completed.stdout or b"{}")
+
+    process = subprocess.Popen(
+        command + ["-i", "pipe:0"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+    )
+    with source.open(path) as stream:
+        try:
+            with process.stdin:  # closing it tells ffprobe the input has ended
+                shutil.copyfileobj(stream, process.stdin)
+        except BrokenPipeError:  # ffprobe already had what it needed and stopped reading
+            pass
+    stdout = process.stdout.read()
+    returncode = process.wait(timeout=60)
+    if returncode != 0:
+        raise subprocess.CalledProcessError(returncode, command)
+    return json.loads(stdout or b"{}")
+
+
 def _ffprobe_creation_time(path: str, source: Source) -> datetime | None:
     ffprobe = shutil.which("ffprobe")
     if not ffprobe:
         return None
     try:
-        with source.local_copy(path) as local:  # ffprobe needs a real file
-            completed = subprocess.run(
-                [ffprobe, "-v", "error", "-print_format", "json",
-                 "-show_entries", "format_tags=creation_time:stream_tags=creation_time", "-i", local],
-                capture_output=True, text=True, timeout=60, check=True,
-            )
-        info = json.loads(completed.stdout or "{}")
+        info = _ffprobe_json(ffprobe, path, source)
     except Exception:
         return None
 

@@ -2,8 +2,11 @@
 import hashlib
 import json
 import os
+import shutil
+import subprocess
 import threading
 import zipfile
+from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import quote, unquote, urlparse
 from xml.sax.saxutils import escape
@@ -372,9 +375,7 @@ def test_zip_source_lists_implicit_directories_and_entries(tmp_path):
         with source.open("Takeout/Google Photos/Vacation/IMG_1.jpg") as stream:
             assert len(stream) == len(b"jpeg-bytes")
             assert stream.read() == b"jpeg-bytes"
-        with source.local_copy("Takeout/Google Photos/Vacation/IMG_1.jpg") as copy:
-            assert open(copy, "rb").read() == b"jpeg-bytes"
-        assert not os.path.exists(copy)  # temporary copy is removed again
+        assert source.local_path("Takeout/Google Photos/Vacation/IMG_1.jpg") is None  # no file on disk
 
     # error markers of an archive live next to it, not inside it
 
@@ -480,4 +481,26 @@ def test_failed_album_goes_to_one_log_and_is_skipped_on_the_next_run(tmp_path, n
     run_import(config, takeout, as_zip)
     assert base + "/bad.jpg" not in nextcloud.files
     assert log_file.read_text(encoding="utf-8") == text
+
+
+@pytest.mark.skipif(not (shutil.which("ffmpeg") and shutil.which("ffprobe")), reason="needs ffmpeg and ffprobe")
+@pytest.mark.parametrize("as_zip", [False, True], ids=["directory", "zip"])
+def test_video_creation_time_is_read_without_writing_it_to_disk(tmp_path, as_zip):
+    clip = tmp_path / "Takeout" / "Google Photos" / "Trip" / "clip.mp4"
+    clip.parent.mkdir(parents=True)
+    subprocess.run(
+        ["ffmpeg", "-v", "error", "-f", "lavfi", "-i", "testsrc=duration=1:size=64x64:rate=5",
+         "-c:v", "mpeg4", "-metadata", "creation_time=2021-05-06T07:08:09Z", str(clip)],
+        check=True,
+    )
+    expected = datetime(2021, 5, 6, 7, 8, 9, tzinfo=timezone.utc)
+    if not as_zip:
+        assert gp2nc.taken_time(str(clip)) == expected
+        return
+    archive = tmp_path / "takeout.zip"
+    with zipfile.ZipFile(archive, "w") as zf:
+        zf.write(clip, "Takeout/Google Photos/Trip/clip.mp4")
+    with ZipSource(str(archive)) as source:
+        assert gp2nc.taken_time("Takeout/Google Photos/Trip/clip.mp4", source) == expected
+    assert list(tmp_path.rglob("*.mp4")) == [clip]  # no copy of the video was written next to the archive
 
