@@ -74,8 +74,8 @@ uv run --project /path/to/gp2nc gp2nc takeout-001.zip takeout-002.zip
   `métadonnées.json`, `metadati.json`, `metadáta.json`, `метаданные.json`, `метаданни.json`). Use
   `--zip-folder "Some/Folder"` for any other language or layout.
 - Zip entries store their date without a time zone; it is read as UTC, the same as EXIF dates without a zone.
-- A directory that fails gets its `gp2nc-error.log` in `gp2nc-errors/<zip name>/<album>/` next to the zip, since
-  a zip cannot be written to. Fix the cause, delete that log and run again.
+- Failures are written to one file, `gp2nc-error.log`: inside the Takeout folder for a directory, next to the zip
+  for a zip. Each failed album is a section headed `=== FAILED ALBUM: <name> ===`.
 
 ### Docker
 
@@ -135,5 +135,5 @@ Behavior is the same, except for these deliberate changes:
 - Optional positional argument for the Takeout directory; each directory's result is logged.
 - The unused `Progress` class of the PHP code was not ported.
 
-Like the original, a directory that fails is skipped on later runs while its `gp2nc-error.log` exists.
-Fix the cause, delete the log, and run again.
+Like the original, an album that fails is skipped on later runs while its section is in `gp2nc-error.log`.
+Fix the cause, remove that album's section from the log, and run again.
