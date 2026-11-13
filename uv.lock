@@ -196,7 +196,7 @@ wheels = [
 
 [[package]]
 name = "gp2nc"
-version = "0.1.0"
+version = "0.1.1"
 source = { editable = "." }
 dependencies = [
     { name = "pillow" },
