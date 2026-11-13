@@ -3,6 +3,8 @@ name = "gp2nc"
 version = "0.1.0"
 description = "Import a Google Photos Takeout into Nextcloud over WebDAV"
 readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.11"
 dependencies = [
     "requests>=2.31",

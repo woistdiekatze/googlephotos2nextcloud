@@ -137,3 +137,7 @@ Behavior is the same, except for these deliberate changes:
 
 Like the original, an album that fails is skipped on later runs while its section is in `gp2nc-error.log`.
 Fix the cause, remove that album's section from the log, and run again.
+
+## License
+
+MIT. See [LICENSE](LICENSE). The code is a port of [rikmeijer/googlephotos2nextcloud](https://github.com/rikmeijer/googlephotos2nextcloud), also MIT (Copyright (c) 2025 Rik Meijer), whose copyright notice is kept in LICENSE.
