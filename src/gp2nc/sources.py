@@ -10,8 +10,6 @@ import calendar
 import contextlib
 import os
 import posixpath
-import shutil
-import tempfile
 import threading
 import unicodedata
 import zipfile
@@ -56,8 +54,8 @@ class Source:
         """Binary, seekable stream of the file. Supports ``len()`` (its size) for HTTP clients."""
         raise NotImplementedError
 
-    def local_copy(self, path: str) -> contextlib.AbstractContextManager[str]:
-        """A path on the local disk holding the file's content, for tools that need one (ffprobe)."""
+    def local_path(self, path: str) -> str | None:
+        """The file's path on the local disk, or None if the content only exists inside an archive."""
         raise NotImplementedError
 
     def close(self) -> None:
@@ -96,9 +94,8 @@ class DirectorySource(Source):
         with open(path, "rb") as handle:
             yield handle
 
-    @contextlib.contextmanager
-    def local_copy(self, path: str) -> Iterator[str]:
-        yield path
+    def local_path(self, path: str) -> str | None:
+        return path
 
 
 class _SizedReader:
@@ -183,15 +180,8 @@ class ZipSource(Source):
         with self._archive().open(info) as stream:
             yield _SizedReader(stream, info.file_size)
 
-    @contextlib.contextmanager
-    def local_copy(self, path: str) -> Iterator[str]:
-        fd, copy = tempfile.mkstemp(suffix=posixpath.splitext(path)[1])
-        try:
-            with os.fdopen(fd, "wb") as out, self.open(path) as stream:
-                shutil.copyfileobj(stream, out)
-            yield copy
-        finally:
-            os.remove(copy)
+    def local_path(self, path: str) -> str | None:
+        return None  # read through open() instead
 
     def close(self) -> None:
         with self._archives_lock:
