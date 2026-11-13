@@ -54,7 +54,7 @@ except Exception:  # pragma: no cover - optional dependency
 
 from PIL import Image
 
-from gp2nc.sources import DIRECTORY, Source, open_takeout
+from gp2nc.sources import DIRECTORY, ERROR_LOG_NAME, Source, open_takeout
 
 # Album title files, named per language of the Takeout (from simulot/TakeoutLocalization)
 ALBUM_METADATA_FILES = (
@@ -288,6 +288,11 @@ _taken_cache: dict[tuple[str, str], datetime] = {}
 
 def utc_from_timestamp(timestamp: int | float) -> datetime:
     return datetime.fromtimestamp(timestamp, tz=timezone.utc)
+
+
+def failure_header(album_name: str) -> str:
+    """The line that starts an album's section in gp2nc-error.log."""
+    return f"=== FAILED ALBUM: {album_name} ==="
 
 
 def _matching(source: Source, directory: str, pattern: str) -> list[str]:
@@ -635,10 +640,12 @@ class DirectoryTask:
         user_albums: list[str],
         remote_files: dict[str, dict[str, dict[str, Any]]],
         executor: ThreadPoolExecutor,
+        error_log_path: str,
         source: Source = DIRECTORY,
     ):
         self.dav = dav
         self.source = source
+        self.error_log_path = error_log_path
         self.files_base_path = files_base_path
         self.albums_base_path = albums_base_path
         self.user_albums = set(user_albums)
@@ -652,13 +659,19 @@ class DirectoryTask:
         with self._hash_locks_guard:
             return self._hash_locks.setdefault(content_hash, threading.Lock())
 
-    def store_exception(self, path: str, error: BaseException) -> str:
+    def store_exception(self, album_path: str, error: BaseException) -> str:
+        """Append the failure of one album as a section of the single error log."""
         trace = "".join(traceback.format_exception(type(error), error, error.__traceback__))
-        marker = self.source.error_log(path)
-        os.makedirs(os.path.dirname(marker), exist_ok=True)
-        with open(marker, "w", encoding="utf-8") as handle:
-            handle.write("\n".join(["Failed processing directory: " + str(error), trace]))
+        os.makedirs(os.path.dirname(self.error_log_path) or ".", exist_ok=True)
+        with open(self.error_log_path, "a", encoding="utf-8") as handle:
+            handle.write(f"\n{failure_header(posixpath.basename(album_path))}\n{error}\n{trace}")
         return "failed: " + str(error)
+
+    def failed_before(self, album_name: str) -> bool:
+        if not os.path.isfile(self.error_log_path):
+            return False
+        with open(self.error_log_path, encoding="utf-8") as handle:
+            return failure_header(album_name) in handle.read().splitlines()
 
     def _copy_to_album(self, source: str, album_path: str, filename: str, debug: Callable[[str], None]) -> None:
         response = self.dav.request(
@@ -675,8 +688,8 @@ class DirectoryTask:
             else None
         )
 
-        if os.path.isfile(self.source.error_log(origin_path)):
-            return "skip to prevent recurring crashes, resolve errors first and delete gp2nc-error.log"
+        if self.failed_before(directory_name):
+            return "skip to prevent recurring crashes, resolve the error and remove its section from " + ERROR_LOG_NAME
 
         files = [p for p in _matching(self.source, origin_path, "*") if self.source.isfile(p)]
         log(f'Found "{directory_name}", containing {len(files)} files')
@@ -863,7 +876,21 @@ def load_config(env: Mapping[str, str]) -> Config:
     return Config(origin, dav_prefix, user, password, parsed.path.rstrip("/"), threads)
 
 
-def run(config: Config, working_directory: str, source: Source = DIRECTORY) -> None:
+def run(
+    config: Config,
+    working_directory: str,
+    source: Source = DIRECTORY,
+    error_log_path: str | None = None,
+) -> None:
+    """Import every album under ``working_directory``.
+
+    Failures of an album are appended to ``error_log_path``. For a directory it defaults to
+    ``gp2nc-error.log`` inside that directory; a zip has no such default and needs an explicit path.
+    """
+    if error_log_path is None:
+        if source is not DIRECTORY:
+            raise ValueError("error_log_path is required when importing from an archive")
+        error_log_path = os.path.join(working_directory, ERROR_LOG_NAME)
     log(f"Working from {working_directory}")
     dav = DavClient(config.origin, config.user, config.password)
 
@@ -932,7 +959,9 @@ def run(config: Config, working_directory: str, source: Source = DIRECTORY) -> N
 
     log("Walking directories...")
     with ThreadPoolExecutor(max_workers=config.threads) as executor:
-        task = DirectoryTask(dav, upload_root, albums_base_path, user_albums, remote_files, executor, source)
+        task = DirectoryTask(
+            dav, upload_root, albums_base_path, user_albums, remote_files, executor, error_log_path, source,
+        )
         for path in _matching(source, working_directory, "*"):
             if not source.isdir(path):
                 continue
@@ -984,8 +1013,10 @@ def main(argv: list[str] | None = None) -> int:
         config = dataclasses.replace(config, threads=args.threads)
     for path in inputs:
         source, root = open_takeout(path, args.zip_folder)
+        # one error log per input: inside a Takeout folder, or next to a zip
+        error_log_path = os.path.join(path if os.path.isdir(path) else os.path.dirname(path), ERROR_LOG_NAME)
         with source:
-            run(config, root, source)
+            run(config, root, source, error_log_path)
     return 0
 
 

@@ -294,7 +294,7 @@ def run_import(config, takeout, as_zip: bool) -> None:
                     zf.write(path, "Takeout/Google Photos/" + path.relative_to(takeout).as_posix())
     source, root = open_takeout(str(archive))  # finds "Takeout/Google Photos" inside the archive
     with source:
-        gp2nc.run(config, root, source)
+        gp2nc.run(config, root, source, str(archive.with_name("gp2nc-error.log")))
 
 
 @pytest.mark.parametrize("as_zip", [False, True], ids=["directory", "zip"])
@@ -377,9 +377,6 @@ def test_zip_source_lists_implicit_directories_and_entries(tmp_path):
         assert not os.path.exists(copy)  # temporary copy is removed again
 
     # error markers of an archive live next to it, not inside it
-    with ZipSource(str(archive)) as source:
-        marker = source.error_log("Takeout/Google Photos/Vacation")
-    assert marker == str(tmp_path / "gp2nc-errors" / "takeout-001.zip" / "Vacation" / "gp2nc-error.log")
 
 
 def test_open_takeout_detects_folder_and_honours_zip_folder(tmp_path):
@@ -447,4 +444,40 @@ def test_localized_takeout_folder_and_album_metadata(tmp_path, nextcloud, monkey
     assert gp2nc.main([str(archive)]) == 0
     assert FILES + "/Photos/2020/06/spiaggia.jpg" in nextcloud.files
     assert ALBUMS + "/" + album in nextcloud.dirs
+
+
+@pytest.mark.parametrize("as_zip", [False, True], ids=["directory", "zip"])
+def test_failed_album_goes_to_one_log_and_is_skipped_on_the_next_run(tmp_path, nextcloud, monkeypatch, as_zip):
+    takeout = tmp_path / "Takeout" / "Google Photos"
+    for name in ("Good", "Bad"):
+        album = takeout / name
+        album.mkdir(parents=True)
+        make_jpeg(album / f"{name.lower()}.jpg", "red", exif_original="2019:07:04 10:11:12")
+
+    original_upload = gp2nc.upload
+
+    def failing_upload(dav, source, photo_path, target):
+        if photo_path.endswith("bad.jpg"):
+            raise RuntimeError("disk on fire")
+        return original_upload(dav, source, photo_path, target)
+
+    monkeypatch.setattr(gp2nc, "upload", failing_upload)
+    config = gp2nc.load_config({"NEXTCLOUD_URL": nextcloud.url})
+    run_import(config, takeout, as_zip)
+
+    base = FILES + "/Photos/2019/07"
+    assert base + "/good.jpg" in nextcloud.files  # the other album still imports
+    assert base + "/bad.jpg" not in nextcloud.files
+
+    log_file = (tmp_path / "gp2nc-error.log") if as_zip else (takeout / "gp2nc-error.log")
+    assert list(tmp_path.rglob("gp2nc-error.log")) == [log_file]  # one file, nowhere else
+    text = log_file.read_text(encoding="utf-8")
+    assert text.count("=== FAILED ALBUM: Bad ===") == 1
+    assert "disk on fire" in text
+
+    # the bug is gone, but the album is still skipped until its section is removed
+    monkeypatch.setattr(gp2nc, "upload", original_upload)
+    run_import(config, takeout, as_zip)
+    assert base + "/bad.jpg" not in nextcloud.files
+    assert log_file.read_text(encoding="utf-8") == text
 

@@ -19,7 +19,6 @@ from collections.abc import Iterator
 from typing import Any, BinaryIO
 
 ERROR_LOG_NAME = "gp2nc-error.log"
-ERROR_LOG_FOLDER = "gp2nc-errors"  # next to a .zip: where error markers of that archive are kept
 # Name of the "Google Photos" folder in a Takeout export, per the language of the Google account
 # (from simulot/TakeoutLocalization). Matched case-sensitively after Unicode NFC normalisation.
 PHOTOS_FOLDER_NAMES = [
@@ -61,10 +60,6 @@ class Source:
         """A path on the local disk holding the file's content, for tools that need one (ffprobe)."""
         raise NotImplementedError
 
-    def error_log(self, album_path: str) -> str:
-        """Local path of the ``gp2nc-error.log`` marker of an album directory."""
-        raise NotImplementedError
-
     def close(self) -> None:
         pass
 
@@ -104,9 +99,6 @@ class DirectorySource(Source):
     @contextlib.contextmanager
     def local_copy(self, path: str) -> Iterator[str]:
         yield path
-
-    def error_log(self, album_path: str) -> str:
-        return posixpath.join(album_path, ERROR_LOG_NAME)
 
 
 class _SizedReader:
@@ -200,12 +192,6 @@ class ZipSource(Source):
             yield copy
         finally:
             os.remove(copy)
-
-    def error_log(self, album_path: str) -> str:
-        return os.path.join(
-            os.path.dirname(self.path), ERROR_LOG_FOLDER, os.path.basename(self.path),
-            posixpath.basename(album_path), ERROR_LOG_NAME,
-        )
 
     def close(self) -> None:
         with self._archives_lock:
