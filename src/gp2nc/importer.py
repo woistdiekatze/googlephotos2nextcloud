@@ -583,7 +583,7 @@ def upload(dav: DavClient, source: Source, photo_path: str, target: str) -> None
     if "content-length" not in head.headers:
         raise RuntimeError("Could not validate remote file, missing content-length headers")
     if local_size != int(head.headers["content-length"]):
-        raise RuntimeError("Could not validate remote file, differ from local size")
+        raise RuntimeError("Could not validate remote file, differs from local size")
 
 
 def move_remote(dav: DavClient, file_path: str, destination: str, _retry: bool = True) -> bool:
@@ -841,7 +841,7 @@ class DirectoryTask:
         photo_remote_path = directory_remote_path + "/" + rawurlencode(local_filename)
 
         upload(self.dav, self.source, photo_path, photo_remote_path)
-        debug(f'Succesfully uploaded to "{photo_remote_path.replace(self.files_base_path, "")}"')
+        debug(f'Successfully uploaded to "{photo_remote_path.replace(self.files_base_path, "")}"')
 
         if album_path is not None:
             debug(f'Copying to album "{directory_name}"')
@@ -872,7 +872,7 @@ class Config:
 def load_config(env: Mapping[str, str]) -> Config:
     url = env.get("NEXTCLOUD_URL")
     if not url:
-        raise SystemExit("Nextcloud URL missing, please set in .env or as environment variable")
+        raise SystemExit("Nextcloud URL missing, please set in .env or as an environment variable")
     parsed = urlparse(url)
     if not parsed.scheme or not parsed.netloc:
         raise SystemExit(f"NEXTCLOUD_URL is not a valid URL: {url!r}")
@@ -890,10 +890,10 @@ def load_config(env: Mapping[str, str]) -> Config:
     user = env.get("NEXTCLOUD_USER") or (unquote(parsed.username) if parsed.username else None)
     if not user:
         raise SystemExit("No Nextcloud user: put it in NEXTCLOUD_URL or set NEXTCLOUD_USER")
-    log(f"Identifing as {user}")
+    log(f"Identifying as {user}")
 
     password = env.get("NEXTCLOUD_PASSWORD") or (unquote(parsed.password) if parsed.password else None)
-    log("Identifing with a password." if password is not None else "Not using a password.")
+    log("Identifying with a password." if password is not None else "Not using a password.")
 
     threads = int(env.get("GP2NC_THREADS", "4"))
     if threads < 1:
