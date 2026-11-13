@@ -44,6 +44,9 @@ from typing import Any, Callable, Mapping
 from urllib.parse import quote, unquote, urlparse
 
 import requests
+from PIL import Image
+
+from gp2nc.sources import DIRECTORY, ERROR_LOG_NAME, Source, open_takeout
 
 try:  # optional: lets Pillow read HEIC/HEIF EXIF data
     import pillow_heif  # type: ignore
@@ -51,10 +54,6 @@ try:  # optional: lets Pillow read HEIC/HEIF EXIF data
     pillow_heif.register_heif_opener()
 except Exception:  # pragma: no cover - optional dependency
     pass
-
-from PIL import Image
-
-from gp2nc.sources import DIRECTORY, ERROR_LOG_NAME, Source, open_takeout
 
 # Album title files, named per language of the Takeout (from simulot/TakeoutLocalization)
 ALBUM_METADATA_FILES = (
@@ -332,7 +331,10 @@ def metadata_timestamp(path: str, name_for_logging: str, source: Source = DIRECT
             return _glob(source, prefix + "." + ext, "*" + glob.escape(increment) + ".json")
 
         if not source.isfile(original_filename):
-            say(f"Possible duplicate of `{posixpath.basename(original_filename)}` in filename, but original file missing")
+            say(
+                f"Possible duplicate of `{posixpath.basename(original_filename)}` in filename, "
+                "but original file missing"
+            )
         elif source.size(path) == source.size(original_filename):
             say(
                 f"Duplicate of `{posixpath.basename(original_filename)}`, try to find additional "
@@ -970,7 +972,10 @@ def run(
     try:
         listing = dav.propfind(upload_root, MEDIA_PROPERTIES, 3)
     except DavHttpError as error:
-        raise SystemExit(f"Could not list the upload folder ({error}). Does {config.upload_path or '/'} exist in Nextcloud?")
+        raise SystemExit(
+            f"Could not list the upload folder ({error}). "
+            f"Does {config.upload_path or '/'} exist in Nextcloud?"
+        )
 
     remote_files: dict[str, dict[str, dict[str, Any]]] = {}
     for file_path, properties in listing.items():

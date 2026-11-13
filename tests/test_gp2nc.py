@@ -332,7 +332,11 @@ def test_end_to_end_import_is_correct_and_idempotent(tmp_path, nextcloud, as_zip
     assert headers["x-oc-ctime"] == "1619870000"
 
     assert ALBUMS + "/Vacation" in nextcloud.dirs
-    entries = sorted(p.rpartition("/")[2].partition("-")[2] for p in nextcloud.files if p.startswith(ALBUMS + "/Vacation/"))
+    entries = sorted(
+        p.rpartition("/")[2].partition("-")[2]
+        for p in nextcloud.files
+        if p.startswith(ALBUMS + "/Vacation/")
+    )
     assert entries == ["beach.jpg", "holiday.jpg", "old photo.jpg", "sunset.jpg"]
     assert not list(tmp_path.rglob("gp2nc-error.log"))
 
@@ -503,4 +507,3 @@ def test_video_creation_time_is_read_without_writing_it_to_disk(tmp_path, as_zip
     with ZipSource(str(archive)) as source:
         assert gp2nc.taken_time("Takeout/Google Photos/Trip/clip.mp4", source) == expected
     assert list(tmp_path.rglob("*.mp4")) == [clip]  # no copy of the video was written next to the archive
-
